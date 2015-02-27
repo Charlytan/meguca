@@ -1,6 +1,8 @@
 var config = require('../config'),
+	fs = require('fs'),
     minimist = require('minimist'),
-    path = require('path');
+    path = require('path'),
+	winston = require('winston');
 
 function usage() {
 	process.stderr.write(
@@ -31,3 +33,23 @@ exports.load_defaults = function () {
 	if (!config.PID_FILE)
 		config.PID_FILE = path.join(__dirname, '.server.pid');
 };
+
+exports.writePID = function() {
+	if (!config.PID_FILE)
+		config.PID_FILE = path.join(__dirname, '.server.pid');
+	fs.writeFile(config.PID_FILE, process.pid+'\n', function (err) {
+		if (err)
+			return winston.warn("Couldn't write pid: " + err);
+		process.once('SIGINT', delete_pid);
+		process.once('SIGTERM', delete_pid);
+		winston.info('PID ' + process.pid + ' written in ' + config.PID_FILE);
+	});
+};
+
+function delete_pid() {
+	try {
+		fs.unlinkSync(config.PID_FILE);
+	}
+	catch (e) { }
+	process.exit(1);
+}

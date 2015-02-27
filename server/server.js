@@ -1,6 +1,4 @@
 var opts = require('./opts');
-if (require.main == module) opts.parse_args();
-opts.load_defaults();
 
 var _ = require('underscore'),
     amusement = require('./amusement'),
@@ -1013,6 +1011,7 @@ dispatcher[common.EXECUTE_JS] = function (msg, client) {
 // Online count
 hooks.hook('clientSynced', function(info, cb){
 	info.client.send([0, common.ONLINE_COUNT, Object.keys(STATE.clientsByIP).length]);
+	debugger;
 	cb(null);
 });
 
@@ -1136,8 +1135,11 @@ function start_server() {
 		socket.on('data', client.on_message.bind(client));
 		socket.on('close', client.on_close.bind(client));
 	});
-
-	process.on('SIGHUP', hot_reloader);
+	// Catch reload requests from master
+	process.on('message', function(msg) {
+		if (msg == 'hotReload')
+			hot_reloader();
+	});
 	db.on_pub('reloadHot', hot_reloader);
 
 	if (config.DAEMON) {
@@ -1149,8 +1151,6 @@ function start_server() {
 		winston.remove(winston.transports.Console);
 		return;
 	}
-
-	process.nextTick(non_daemon_pid_setup);
 
 	winston.info('Listening on '
 			+ (config.LISTEN_HOST || '')
@@ -1172,58 +1172,33 @@ function hot_reloader() {
 	});
 }
 
-function non_daemon_pid_setup() {
-	var pidFile = config.PID_FILE;
-	fs.writeFile(pidFile, process.pid+'\n', function (err) {
-		if (err)
-			return winston.warn("Couldn't write pid: " + err);
-		process.once('SIGINT', delete_pid);
-		process.once('SIGTERM', delete_pid);
-		winston.info('PID ' + process.pid + ' written in ' + pidFile);
-	});
-
-	function delete_pid() {
-		try {
-			fs.unlinkSync(pidFile);
+async.series([
+	imager.make_media_dirs,
+	setup_imager_relay,
+	STATE.reload_hot_resources,
+	db.track_OPs,
+], function (err) {
+	if (err)
+		throw err;
+	// Start JSON API express server
+	require('./api');
+	var yaku = new db.Yakusoku(null, db.UPKEEP_IDENT);
+	var onegai;
+	var writes = [];
+	if (!config.READ_ONLY) {
+		writes.push(yaku.finish_all.bind(yaku));
+		if (!imager.is_standalone()) {
+			onegai = new imager.Onegai;
+			writes.push(onegai.delete_temporaries.bind(
+					onegai));
 		}
-		catch (e) { }
-		process.exit(1);
 	}
-}
-
-if (require.main == module) {
-	if (!process.getuid())
-		throw new Error("Refusing to run as root.");
-	if (!tripcode.setSalt(config.SECURE_SALT))
-		throw "Bad SECURE_SALT";
-	async.series([
-		imager.make_media_dirs,
-		setup_imager_relay,
-		STATE.reload_hot_resources,
-		db.track_OPs,
-	], function (err) {
+	async.series(writes, function (err) {
 		if (err)
 			throw err;
-		// Start JSON API express server
-		require('./api');
-		var yaku = new db.Yakusoku(null, db.UPKEEP_IDENT);
-		var onegai;
-		var writes = [];
-		if (!config.READ_ONLY) {
-			writes.push(yaku.finish_all.bind(yaku));
-			if (!imager.is_standalone()) {
-				onegai = new imager.Onegai;
-				writes.push(onegai.delete_temporaries.bind(
-						onegai));
-			}
-		}
-		async.series(writes, function (err) {
-			if (err)
-				throw err;
-			yaku.disconnect();
-			if (onegai)
-				onegai.disconnect();
-			process.nextTick(start_server);
-		});
+		yaku.disconnect();
+		if (onegai)
+			onegai.disconnect();
+		process.nextTick(start_server);
 	});
-}
+});
